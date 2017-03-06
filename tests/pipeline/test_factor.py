@@ -710,12 +710,112 @@ class FactorTestCase(BasePipelineTestCase):
             check=partial(check_allclose, atol=0.001),
         )
 
+    def test_winsorize_hand_computed(self):
+        """
+        Test the hand-computed example in factor.winsorize.
+        """
+        f = self.f
+        m = Mask()
+        c = C()
+        str_c = C(dtype=categorical_dtype, missing_value=None)
+
+        factor_data = array([
+            [1.,     2.,  3.,  4.,   5.,   6.],
+            [1.,     8., 27., 64., 125., 216.],
+            [6.,     5.,  4.,  3.,   2.,   1.]
+        ])
+        filter_data = array(
+            [[False, True, True, True, True, True],
+             [True, False, True, True, True, True],
+             [True, True, False, True, True, True]],
+            dtype=bool,
+        )
+        classifier_data = array(
+            [[1, 1, 1, 2, 2, 2],
+             [1, 1, 1, 2, 2, 2],
+             [1, 1, 1, 2, 2, 2]],
+            dtype=int64_dtype,
+        )
+        string_classifier_data = LabelArray(
+            classifier_data.astype(str).astype(object),
+            missing_value=None,
+        )
+
+        terms = {
+            'winsor_1': f.winsorize(limits=33),
+            'winsor_2': f.winsorize(limits=(49, None)),
+            'winsor_3': f.winsorize(limits=33, inclusive=(False, False)),
+            'winsor_4': f.winsorize(limits=33, inclusive=(True, False)),
+            'masked': f.winsorize(limits=33, mask=m),
+            'grouped': f.winsorize(limits=34, groupby=c),
+            'grouped_str': f.winsorize(limits=34, groupby=str_c),
+            'grouped_masked': f.winsorize(limits=34, mask=m, groupby=c),
+            'grouped_masked_str': f.winsorize(limits=34, mask=m, groupby=str_c)
+        }
+        expected = {
+            'winsor_1': array([
+                [2.,    2.,    3.,    4.,    5.,    5.],
+                [8.,    8.,   27.,   64.,  125.,  125.],
+                [5.,    5.,    4.,    3.,    2.,    2.]
+            ]),
+            'winsor_2': array([
+                [3.0,    3.,    3.,    4.,    5.,    6.],
+                [27.,   27.,   27.,   64.,  125.,  216.],
+                [6.0,    5.,    4.,    3.,    3.,    3.]
+            ]),
+            'winsor_3': array([
+                [3.0,   3.,   3.,   4.,   4.,   4.],
+                [27.,  27.,  27.,  64.,  64.,  64.],
+                [4.0,   4.,   4.,   3.,   3.,   3.]
+            ]),
+            'winsor_4': array([
+                [2.,   2.,   3.,   4.,   4.,   4.],
+                [8.,   8.,  27.,  64.,  64.,  64.],
+                [4.,   4.,   4.,   3.,   2.,   2.]
+            ]),
+            'masked': array([
+                [nan,    3.,    3.,    4.,    5.,    5.],
+                [27.,   nan,   27.,   64.,  125.,  125.],
+                [5.0,    5.,    nan,    3.,    2.,   2.]
+            ]),
+            'grouped': array([
+                [2.,    2.,    2.,    5.,    5.,    5.],
+                [8.,    8.,    8.,  125.,  125.,  125.],
+                [5.,    5.,    5.,    2.,    2.,    2.]
+            ]),
+            'grouped_masked': array([
+                [nan,    2.,    3.,    5.,    5.,    5.],
+                [1.0,   nan,   27.,  125.,  125.,  125.],
+                [6.0,    5.,    nan,    2.,    2.,   2.]
+            ])
+        }
+        # Changing the classifier dtype shouldn't affect anything.
+        expected['grouped_str'] = expected['grouped']
+        expected['grouped_masked_str'] = expected['grouped_masked']
+
+        self.check_terms(
+            terms,
+            expected,
+            initial_workspace={
+                f: factor_data,
+                c: classifier_data,
+                str_c: string_classifier_data,
+                m: filter_data,
+            },
+            mask=self.build_mask(self.ones_mask(shape=factor_data.shape)),
+            check=partial(check_allclose, atol=0.001),
+        )
+
     @parameter_space(
         seed_value=range(1, 2),
         normalizer_name_and_func=[
-            ('demean', lambda row: row - nanmean(row)),
-            ('zscore', lambda row: (row - nanmean(row)) / nanstd(row)),
-            ('winsorize', lambda row: scipy_winsorize(row, limits=0.05)),
+            ('demean', {}, lambda row: row - nanmean(row)),
+            ('zscore', {}, lambda row: (row - nanmean(row)) / nanstd(row)),
+            (
+                'winsorize',
+                {"limits": 25.},
+                lambda row: scipy_winsorize(row, limits=0.25)
+            ),
         ],
         add_nulls_to_factor=(False, True,),
     )
@@ -724,9 +824,9 @@ class FactorTestCase(BasePipelineTestCase):
                                        normalizer_name_and_func,
                                        add_nulls_to_factor):
 
-        name, func = normalizer_name_and_func
+        name, kwargs, func = normalizer_name_and_func
 
-        shape = (7, 7)
+        shape = (20, 20)
 
         # All Trues.
         nomask = self.ones_mask(shape=shape)
@@ -757,7 +857,7 @@ class FactorTestCase(BasePipelineTestCase):
         c = C()
         c_with_nulls = OtherC()
         m = Mask()
-        method = getattr(f, name)
+        method = partial(getattr(f, name), **kwargs)
         terms = {
             'vanilla': method(),
             'masked': method(mask=m),
@@ -1054,7 +1154,7 @@ class ShortReprTestCase(TestCase):
         self.assertEqual(r, "GroupedRowTransform('zscore')")
 
     def test_winsorize(self):
-        r = F().winsorize().short_repr()
+        r = F().winsorize(limits=5).short_repr()
         self.assertEqual(r, "GroupedRowTransform('winsorize')")
 
 
@@ -1069,7 +1169,9 @@ class TestWindowSafety(TestCase):
         self.assertTrue(F(window_safe=True).demean().window_safe)
 
     def test_winsorize_is_window_safe(self):
-        self.assertTrue(F().winsorize().window_safe)
+        self.assertFalse(F().winsorize(limits=5).window_safe)
+        self.assertFalse(F(window_safe=False).winsorize(limits=5).window_safe)
+        self.assertTrue(F(window_safe=True).winsorize(limits=5).window_safe)
 
 
 class TestPostProcessAndToWorkSpaceValue(ZiplineTestCase):

@@ -833,6 +833,7 @@ class Factor(RestrictedDTypeMixin, ComputableTerm):
             regression_length=regression_length,
             mask=mask,
         )
+
     @float64_only
     def winsorize(self,
                   limits,
